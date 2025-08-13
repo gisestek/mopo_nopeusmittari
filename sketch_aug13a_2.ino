@@ -32,6 +32,8 @@ using fs::FS;            // <<< globaali alias 'FS' -> 'fs::FS' (korjaa esp32 co
 static const int GPS_RX_PIN = 16;   // kytke GPS TX tähän
 static const int GPS_TX_PIN = 21;   // kytke GPS RX tähän (usein vapaaehtoinen)
 static const uint32_t GPS_BAUD = 9600;
+static uint32_t GPS_BAUD_USED = GPS_BAUD; // päivitetään automaattisesti
+static bool GPS_DET_UBX = false;         // jos havaitaan UBX-binaari, merkitään tämä
 
 // Näyttöasetuksia
 static const uint32_t SPLASH_MS = 3000;   // aloitusnäyttö näkyy näin pitkään (ms)
@@ -357,6 +359,61 @@ static float hdopValue() {
   return NAN;
 }
 
+// ===================== GPS baud -autodetect =====================
+static void gpsBeginAt(uint32_t baud) {
+  GPSSerial.end();
+  GPSSerial.begin(baud, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+}
+
+static bool bufferHasNmea(const char* buf, size_t len) {
+  for (size_t i=0;i+6<len;i++) {
+    if (buf[i]=='$' && (buf[i+1]=='G' || buf[i+1]=='N')) {
+      for (size_t j=i+2; j<i+80 && j<len; j++) {
+        if (buf[j]=='*') return true;
+      }
+    }
+  }
+  return false;
+}
+static bool bufferHasUbx(const char* buf, size_t len) {
+  for (size_t i=0;i+1<len;i++) if ((uint8_t)buf[i]==0xB5 && (uint8_t)buf[i+1]==0x62) return true;
+  return false;
+}
+
+static uint32_t autoDetectGpsBaud(uint32_t timeoutPerBaudMs=1200) {
+  const uint32_t candidates[] = {9600, 38400, 57600, 115200};
+  char buf[256];
+  for (uint32_t b : candidates) {
+    gpsBeginAt(b);
+    memset(buf, 0, sizeof(buf));
+    size_t pos = 0;
+    uint32_t start = millis();
+    while (millis() - start < timeoutPerBaudMs) {
+      while (GPSSerial.available()) {
+        char c = GPSSerial.read();
+        if (pos < sizeof(buf)-1) buf[pos++] = c;
+        gps.encode(c);
+        lastGpsMs = millis();
+      }
+      delay(1);
+    }
+    bool nmea = bufferHasNmea(buf, pos);
+    bool ubx  = bufferHasUbx(buf, pos);
+    if (nmea || ubx) {
+      GPS_BAUD_USED = b;
+      GPS_DET_UBX = ubx && !nmea;
+      Serial.print(F("[GPS] Baud havaittu: ")); Serial.print(b);
+      if (nmea) Serial.println(F(" (NMEA)")); else Serial.println(F(" (UBX)"));
+      return b;
+    }
+  }
+  Serial.println(F("[GPS] Baud ei löytynyt, käytetään oletusta 9600"));
+  gpsBeginAt(GPS_BAUD);
+  GPS_BAUD_USED = GPS_BAUD;
+  GPS_DET_UBX = false;
+  return 0;
+}
+
 static int safeHeading() {
   if (gps.course.isValid() && gps.location.isValid()) {
     return (int)round(gps.course.deg());
@@ -426,6 +483,7 @@ static String htmlPage() {
   s += F("<div class=k><b>Satelliitit:</b> "); s += (sats>=0? String(sats): String("--")); s += F(" kpl</div>");
   s += F("<div class=k><b>GPS-fix:</b> "); s += (fix==3?"3D":(fix==2?"2D":"--")); s += F("</div>");
   s += F("<div class=k><b>HDOP:</b> "); s += (!isnan(hd)? String(hd,1): String("--")); s += F("</div>");
+  s += F("<div class=k><b>GPS baud:</b> "); s += String(GPS_BAUD_USED); if (GPS_DET_UBX) s += F(" (UBX)"); s += F("</div>");
   s += F("<div class=k><b>Akku: </b>"); s += String(vbat, 2); s += F(" V &nbsp;("); s += String(pbat); s += F("%)</div>");
   s += F("<hr>");
   if (oilDue) {
@@ -492,6 +550,7 @@ static void setupWiFiAP() {
   server.on("/manual", HTTP_GET, [](){ server.sendHeader("Location", MAINT_URL); server.send(302); });
   server.on("/nmea_on",  HTTP_GET, [](){ NMEA_BRIDGE = true;  server.sendHeader("Location","/"); server.send(303); });
   server.on("/nmea_off", HTTP_GET, [](){ NMEA_BRIDGE = false; server.sendHeader("Location","/"); server.send(303); });
+  server.on("/scan_baud", HTTP_GET, [](){ autoDetectGpsBaud(1500); server.sendHeader("Location","/"); server.send(303); });
   server.begin();
 }
 
@@ -584,7 +643,9 @@ void setup() {
   analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
 
   // GPS UART
+  // Aloita oletuksella ja skannaa sitten
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  autoDetectGpsBaud(1500);
 
   // NVS
   prefs.begin(PREF_NAMESPACE, false);
