@@ -21,7 +21,7 @@ ESP32-S3 (LILYGO **T-Display S3**) + GPS = a clean, sunlight-readable speedomete
 
 - **MCU/Display:** LILYGO **T-Display S3** (ESP32-S3 + 1.9" TFT)
 - **GPS module:** CASIC **AT6558R** (URANUS5) or any NMEA GNSS (also works with u-blox)
-- **Power:** 1S **LiPo**
+- **Power:** 1S **LiPo** (mine is three cells from old computer battery)
 - **Antenna:** passive patch (prefer a **metal ground plate** under it) or active GPS antenna
 
 ### Wiring
